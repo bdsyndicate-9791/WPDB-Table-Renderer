@@ -4,7 +4,7 @@
 
 [![WordPress](https://img.shields.io/badge/WordPress-%E2%9C%93-21759B?logo=wordpress)](https://wordpress.org)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-777BB4?logo=php)](https://www.php.net)
-[![License](ttps://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
 ---
 
