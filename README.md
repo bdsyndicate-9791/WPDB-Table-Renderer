@@ -4,7 +4,7 @@
 
 [![WordPress](https://img.shields.io/badge/WordPress-%E2%9C%93-21759B?logo=wordpress)](https://wordpress.org)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-777BB4?logo=php)](https://www.php.net)
-[![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
+[![License](ttps://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ---
 
@@ -245,7 +245,7 @@ class Mi_Tabla_Especial extends WPDB_Table_Renderer {
 
 ## 📄 Licencia
 
-Este proyecto está licenciado bajo **GPLv3** – ver [LICENSE](LICENSE) para más detalles.
+Este proyecto está licenciado bajo **APACHEv2** – ver [LICENSE](LICENSE) para más detalles.
 
 ---
 
