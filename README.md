@@ -20,7 +20,6 @@
 ✅ **Celdas personalizables** con callbacks  
 ✅ **Soporte AJAX** nativo  
 ✅ **Seguro**: sanitización y escaping integrados  
-✅ **Ligero**: solo 300 líneas de código limpio
 
 Ideal para plugins, dashboards personalizados, reporting, y más.
 
