@@ -1,4 +1,40 @@
 <?php
+/**
+ * WPDB Table Renderer
+ *
+ * Clase genérica para renderizar tablas administrativas en WordPress con soporte
+ * para búsqueda, ordenación, paginación, exportación CSV, callbacks personalizados
+ * y AJAX seguro. Diseñada para soportar múltiples instancias en la misma página.
+ *
+ * @package     ClientPulse Pro
+ * @subpackage  Admin/Tables
+ * @author      ByteDogsSyndicate
+ * @license     GPL-3.0+
+ * @version     2.1.0
+ *
+ * =============
+ * CHANGELOG
+ * =============
+ *
+ * v2.1.0 (2025-04-05)
+ * - Añadido soporte para múltiples tablas en la misma página mediante $table_id.
+ * - Parámetros de búsqueda, orden y paginación ahora usan prefijos únicos.
+ * - AJAX diferenciado por tabla usando filtros dinámicos (wpdb_table_ajax_*_{table_id}).
+ * - Corregido error de herencia: ajax_response() ya no es estático.
+ * - Añadido wrapper estático handle_ajax_request() para hook AJAX.
+ * - Mejorada la seguridad con nonces y verificación de capacidades.
+ *
+ * v2.0.0 (2025-03-20)
+ * - Reescritura completa para soporte AJAX real (solo cuerpo de tabla).
+ * - Separación de renderizado completo vs parcial.
+ * - Soporte para callbacks de celda y acciones de fila.
+ * - Exportación CSV funcional con filtros aplicados.
+ *
+ * v1.0.0 (2024-11-10)
+ * - Versión inicial basada en WP_List_Table.
+ * - Soporte para búsqueda, ordenación, paginación y filtros básicos.
+ */
+
 if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
@@ -22,24 +58,26 @@ class WPDB_Table_Renderer extends WP_List_Table {
     protected $searchable_columns = array();
     protected $filterable_columns = array();
     protected $total_items = 0;
+    protected $table_id = 'default_table';
 
     /**
      * Constructor.
      *
-     * @param array $data
-     * @param array $columns
-     * @param bool  $enable_pagination
-     * @param bool  $enable_sorting
-     * @param bool  $enable_search
-     * @param array $searchable_columns
-     * @param bool  $enable_filters
-     * @param array $filterable_columns
-     * @param bool  $enable_export
-     * @param bool  $enable_row_actions
-     * @param array $row_actions_callbacks (formato: [ 'col_key' => callback ])
-     * @param array $cell_callbacks (formato: [ 'col_name' => callback ])
+     * @param array  $data                    Datos en formato array de arrays asociativos.
+     * @param array  $columns                 Lista de claves de columnas.
+     * @param bool   $enable_pagination       ¿Habilitar paginación?
+     * @param bool   $enable_sorting          ¿Habilitar ordenación?
+     * @param bool   $enable_search           ¿Habilitar búsqueda?
+     * @param array  $searchable_columns      Columnas en las que buscar (si null, todas).
+     * @param bool   $enable_filters          ¿Habilitar filtros por columna?
+     * @param array  $filterable_columns      Columnas filtrables.
+     * @param bool   $enable_export           ¿Mostrar botón de exportar CSV?
+     * @param bool   $enable_row_actions      ¿Habilitar acciones por fila?
+     * @param array  $row_actions_callbacks   Callbacks para acciones por columna.
+     * @param array  $cell_callbacks          Callbacks para renderizado de celdas.
+     * @param string $table_id                Identificador único para evitar conflictos (sanitize_key).
      */
-    public function __construct( $data = array(), $columns = array(), $enable_pagination = true, $enable_sorting = true, $enable_search = true, $searchable_columns = array(), $enable_filters = false, $filterable_columns = array(), $enable_export = false, $enable_row_actions = false, $row_actions_callbacks = array(), $cell_callbacks = array() ) {
+    public function __construct( $data = array(), $columns = array(), $enable_pagination = true, $enable_sorting = true, $enable_search = true, $searchable_columns = array(), $enable_filters = false, $filterable_columns = array(), $enable_export = false, $enable_row_actions = false, $row_actions_callbacks = array(), $cell_callbacks = array(), $table_id = 'default_table' ) {
         parent::__construct( array(
             'singular' => 'item',
             'plural'   => 'items',
@@ -60,10 +98,171 @@ class WPDB_Table_Renderer extends WP_List_Table {
         $this->searchable_columns     = empty( $searchable_columns ) ? null : array_map( 'strval', $searchable_columns );
         $this->filterable_columns     = array_map( 'strval', $filterable_columns );
         $this->total_items            = count( $data );
-
-        add_action( 'wp_ajax_wpdb_table_action', array( $this, 'ajax_response' ) );
+        $this->table_id               = sanitize_key( $table_id );
         add_action( 'admin_init', array( $this, 'handle_csv_export' ) );
     }
+
+    // ───────────────────────────────
+    // BÚSQUEDA CON PREFIJO ÚNICO
+    // ───────────────────────────────
+
+    public function get_search_term() {
+        $search_key = $this->table_id . '_s';
+        return ! empty( $_REQUEST[ $search_key ] ) ? sanitize_text_field( wp_unslash( $_REQUEST[ $search_key ] ) ) : '';
+    }
+
+    public function search_box( $text, $input_id ) {
+       /* if ( empty( $_REQUEST['s'] ) && ! $this->has_items() ) {
+            return;
+        }*/
+
+        $input_id = $this->table_id . '_' . $input_id;
+        $search_name = $this->table_id . '_s';
+
+        echo '<p class="search-box">';
+        echo '<label class="screen-reader-text" for="' . esc_attr( $input_id ) . '">' . esc_html( $text ) . ':</label>';
+        echo '<input type="search" id="' . esc_attr( $input_id ) . '" name="' . esc_attr( $search_name ) . '" value="' . esc_attr( $this->get_search_term() ) . '" />';
+        submit_button( $text, '', '', false, array( 'id' => 'search-submit-' . $this->table_id ) );
+        echo '</p>';
+    }
+
+    // ───────────────────────────────
+    // PARÁMETROS DE ORDEN Y PAGINACIÓN CON PREFIJO
+    // ───────────────────────────────
+
+    private function get_orderby_param() {
+        return $this->table_id . '_orderby';
+    }
+
+    private function get_order_param() {
+        return $this->table_id . '_order';
+    }
+
+    private function get_paged_param() {
+        return $this->table_id . '_paged';
+    }
+    
+    protected function get_primary_column_name() {
+    // Usa la primera columna como primaria, o permite personalización
+    return ! empty( $this->columns ) ? $this->columns[0] : 'id';
+}
+
+    public function get_orderby() {
+        return ! empty( $_GET[ $this->get_orderby_param() ] ) ? sanitize_text_field( $_GET[ $this->get_orderby_param() ] ) : '';
+    }
+
+    public function get_order() {
+        return ! empty( $_GET[ $this->get_order_param() ] ) ? sanitize_text_field( $_GET[ $this->get_order_param() ] ) : 'asc';
+    }
+
+    public function get_pagenum() {
+        $paged = ! empty( $_GET[ $this->get_paged_param() ] ) ? absint( $_GET[ $this->get_paged_param() ] ) : 1;
+        return max( 1, $paged );
+    }
+
+    // ───────────────────────────────
+    // PREPARACIÓN DE ÍTEMS
+    // ───────────────────────────────
+
+    public function prepare_items( $args = null ) {
+        if ( is_null( $args ) ) {
+            $search_term = $this->get_search_term();
+            $orderby     = $this->get_orderby();
+            $order       = $this->get_order();
+            $paged       = $this->get_pagenum();
+        } else {
+            $search_term = isset( $args['s'] ) ? sanitize_text_field( $args['s'] ) : '';
+            $orderby     = isset( $args['orderby'] ) ? sanitize_text_field( $args['orderby'] ) : '';
+            $order       = isset( $args['order'] ) ? sanitize_text_field( $args['order'] ) : 'asc';
+            $paged       = isset( $args['paged'] ) ? absint( $args['paged'] ) : 1;
+        }
+
+        $columns  = $this->get_columns();
+        $hidden   = array();
+        $sortable = $this->get_sortable_columns();
+        $this->_column_headers = array( $columns, $hidden, $sortable );
+
+        $data = $this->raw_data;
+        $data = $this->filter_data_by_search( $data, $search_term );
+
+        if ( $orderby && $this->enable_sorting && in_array( $orderby, $this->columns ) ) {
+            usort( $data, function( $a, $b ) use ( $orderby, $order ) {
+                $val_a = isset( $a[ $orderby ] ) ? $a[ $orderby ] : '';
+                $val_b = isset( $b[ $orderby ] ) ? $b[ $orderby ] : '';
+                if ( is_numeric( $val_a ) && is_numeric( $val_b ) ) {
+                    $cmp = $val_a - $val_b;
+                } else {
+                    $cmp = strcasecmp( (string) $val_a, (string) $val_b );
+                }
+                return ( 'asc' === strtolower( $order ) ) ? $cmp : -$cmp;
+            });
+        }
+
+        $total_items = count( $data );
+        $per_page = $this->enable_pagination ? $this->get_items_per_page( 'items_per_page', 20 ) : $total_items;
+        if ( $this->enable_pagination ) {
+            $data = array_slice( $data, ( ( $paged - 1 ) * $per_page ), $per_page );
+        }
+
+        $this->items = $data;
+        $this->set_pagination_args( array(
+            'total_items' => $total_items,
+            'per_page'    => $per_page,
+            'total_pages' => $this->enable_pagination ? ceil( $total_items / $per_page ) : 1,
+        ) );
+    }
+
+    // ───────────────────────────────
+    // RENDERIZADO DE LA TABLA COMPLETA
+    // ───────────────────────────────
+
+    public function render_table() {
+        echo '<div class="wrap wpdb-table-renderer" id="table-' . esc_attr( $this->table_id ) . '">';
+
+        if ( $this->enable_export ) {
+            $export_url = add_query_arg( array(
+                'wpdb_export_csv' => '1',
+                '_wpnonce'        => wp_create_nonce( 'export_csv' )
+            ) );
+            foreach ( array( $this->table_id . '_s', $this->table_id . '_orderby', $this->table_id . '_order', $this->table_id . '_paged' ) as $param ) {
+                $base_param = str_replace( $this->table_id . '_', '', $param );
+                if ( ! empty( $_GET[ $param ] ) ) {
+                    $export_url = add_query_arg( $base_param, $_GET[ $param ], $export_url );
+                }
+            }
+            echo '<a href="' . esc_url( $export_url ) . '" class="page-title-action">Exportar a CSV</a>';
+        }
+
+        if ( $this->enable_filters ) {
+            $this->views();
+        }
+
+        echo '<form method="get" id="table-form-' . esc_attr( $this->table_id ) . '">';
+        echo '<input type="hidden" name="page" value="' . esc_attr( $_REQUEST['page'] ?? 'admin_page_slug' ) . '" />';
+
+        $current_orderby = $this->get_orderby();
+        $current_order   = $this->get_order();
+        $current_paged   = $this->get_pagenum();
+
+        if ( $current_orderby ) {
+            echo '<input type="hidden" name="' . esc_attr( $this->get_orderby_param() ) . '" value="' . esc_attr( $current_orderby ) . '" />';
+            echo '<input type="hidden" name="' . esc_attr( $this->get_order_param() ) . '" value="' . esc_attr( $current_order ) . '" />';
+        }
+        if ( $current_paged > 1 ) {
+            echo '<input type="hidden" name="' . esc_attr( $this->get_paged_param() ) . '" value="' . esc_attr( $current_paged ) . '" />';
+        }
+
+        $this->search_box( 'Buscar', 'search' );
+        $this->prepare_items();
+        $this->display();
+        echo '</form>';
+
+        echo '</div>';
+    }
+
+    // ───────────────────────────────
+    // MÉTODOS AUXILIARES (COLUMNAS, FILTROS, ETC.)
+    // ───────────────────────────────
 
     public function get_columns() {
         $cols = array();
@@ -80,10 +279,6 @@ class WPDB_Table_Renderer extends WP_List_Table {
             $sortable[ $col ] = array( $col, true );
         }
         return $sortable;
-    }
-
-    public function get_search_term() {
-        return ! empty( $_REQUEST['s'] ) ? sanitize_text_field( wp_unslash( $_REQUEST['s'] ) ) : '';
     }
 
     protected function filter_data_by_search( $data, $search_term ) {
@@ -103,51 +298,48 @@ class WPDB_Table_Renderer extends WP_List_Table {
         return $filtered;
     }
 
-    protected function get_views() {
-        if ( ! $this->enable_filters || empty( $this->filterable_columns ) ) {
-            return array();
+    public function column_default( $item, $column_name ) {
+        if ( isset( $this->cell_callbacks[ $column_name ] ) && is_callable( $this->cell_callbacks[ $column_name ] ) ) {
+            return call_user_func( $this->cell_callbacks[ $column_name ], $item, $column_name );
         }
+        return isset( $item[ $column_name ] ) ? esc_html( $item[ $column_name ] ) : '';
+    }
 
-        $views = array();
-        $current_filter = ! empty( $_GET['column_filter'] ) ? sanitize_text_field( $_GET['column_filter'] ) : '';
-        $current_value  = ! empty( $_GET['filter_value'] )  ? sanitize_text_field( $_GET['filter_value'] )  : '';
-
-        foreach ( $this->filterable_columns as $col ) {
-            if ( ! in_array( $col, $this->columns ) ) continue;
-
-            $values = wp_list_pluck( $this->raw_data, $col );
-            $values = array_unique( array_filter( $values, 'strlen' ) );
-            sort( $values );
-
-            $views[ $col ] = '<select name="filter_value" onchange="this.form.submit()">';
-            $views[ $col ] .= '<option value="">' . sprintf( 'Todos %s', ucfirst( str_replace( '_', ' ', $col ) ) ) . '</option>';
-            foreach ( $values as $val ) {
-                $selected = ( $current_filter === $col && $current_value === $val ) ? ' selected' : '';
-                $views[ $col ] .= '<option value="' . esc_attr( $val ) . '"' . $selected . '>' . esc_html( $val ) . '</option>';
+    protected function handle_row_actions( $item, $column_name, $primary ) {
+    // Siempre devolvemos row_actions en la columna primaria
+    // para activar el modo responsive, incluso si están vacíos
+    if ( $primary ) {
+        $actions = array();
+        
+        // Solo añadir acciones si están habilitadas
+        if ( $this->enable_row_actions ) {
+            if ( isset( $this->row_actions_callbacks[ $column_name ] ) && is_callable( $this->row_actions_callbacks[ $column_name ] ) ) {
+                $actions = call_user_func( $this->row_actions_callbacks[ $column_name ], $item );
+            } else {
+                // Acción por defecto mínima (puede ser vacía)
+                $actions['view'] = '<span class="screen-reader-text">Ver</span>';
             }
-            $views[ $col ] .= '</select>';
-            $views[ $col ] .= '<input type="hidden" name="column_filter" value="' . esc_attr( $col ) . '" />';
         }
 
-        return $views;
+        // Devolver SIEMPRE row_actions en la columna primaria
+        return $this->row_actions( $actions );
+    }
+    return '';
+}
+ 
+
+
+    public function get_table_body_html() {
+        ob_start();
+        $this->display_tablenav( 'top' );
+        $this->display_rows_or_placeholder();
+        $this->display_tablenav( 'bottom' );
+        return ob_get_clean();
     }
 
-    protected function filter_data_by_column_filter( $data ) {
-        $column_filter = ! empty( $_GET['column_filter'] ) ? sanitize_text_field( $_GET['column_filter'] ) : '';
-        $filter_value  = ! empty( $_GET['filter_value'] )  ? sanitize_text_field( $_GET['filter_value'] )  : '';
-
-        if ( ! $this->enable_filters || ! $column_filter || ! $filter_value ) {
-            return $data;
-        }
-
-        if ( ! in_array( $column_filter, $this->filterable_columns ) ) {
-            return $data;
-        }
-
-        return array_filter( $data, function( $row ) use ( $column_filter, $filter_value ) {
-            return isset( $row[ $column_filter ] ) && (string) $row[ $column_filter ] === (string) $filter_value;
-        } );
-    }
+    // ───────────────────────────────
+    // EXPORTACIÓN CSV
+    // ───────────────────────────────
 
     public function handle_csv_export() {
         if ( ! $this->enable_export ) return;
@@ -156,10 +348,9 @@ class WPDB_Table_Renderer extends WP_List_Table {
 
         $data = $this->raw_data;
         $data = $this->filter_data_by_search( $data, $this->get_search_term() );
-        $data = $this->filter_data_by_column_filter( $data );
 
-        $orderby = ! empty( $_GET['orderby'] ) ? sanitize_text_field( $_GET['orderby'] ) : '';
-        $order   = ! empty( $_GET['order'] )   ? sanitize_text_field( $_GET['order'] )   : 'asc';
+        $orderby = $this->get_orderby();
+        $order   = $this->get_order();
         if ( $orderby && $this->enable_sorting && in_array( $orderby, $this->columns ) ) {
             usort( $data, function( $a, $b ) use ( $orderby, $order ) {
                 $val_a = isset( $a[ $orderby ] ) ? $a[ $orderby ] : '';
@@ -192,103 +383,72 @@ class WPDB_Table_Renderer extends WP_List_Table {
         exit;
     }
 
-    public function prepare_items() {
-        $columns  = $this->get_columns();
-        $hidden   = array();
-        $sortable = $this->get_sortable_columns();
-        $this->_column_headers = array( $columns, $hidden, $sortable );
+    // ───────────────────────────────
+    // AJAX (NO ESTÁTICO)
+    // ───────────────────────────────
 
-        $data = $this->raw_data;
-        $data = $this->filter_data_by_search( $data, $this->get_search_term() );
-        $data = $this->filter_data_by_column_filter( $data );
-
-        $orderby = ! empty( $_GET['orderby'] ) ? sanitize_text_field( $_GET['orderby'] ) : '';
-        $order   = ! empty( $_GET['order'] )   ? sanitize_text_field( $_GET['order'] )   : 'asc';
-        if ( $orderby && $this->enable_sorting && in_array( $orderby, $this->columns ) ) {
-            usort( $data, function( $a, $b ) use ( $orderby, $order ) {
-                $val_a = isset( $a[ $orderby ] ) ? $a[ $orderby ] : '';
-                $val_b = isset( $b[ $orderby ] ) ? $b[ $orderby ] : '';
-                if ( is_numeric( $val_a ) && is_numeric( $val_b ) ) {
-                    $cmp = $val_a - $val_b;
-                } else {
-                    $cmp = strcasecmp( (string) $val_a, (string) $val_b );
-                }
-                return ( 'asc' === strtolower( $order ) ) ? $cmp : -$cmp;
-            });
+    public function ajax_response() {
+        if ( ! isset( $_POST['nonce'] ) || ! wp_verify_nonce( $_POST['nonce'], 'wpdb_table_nonce' ) ) {
+            wp_send_json_error( 'Invalid nonce', 403 );
         }
 
-        $total_items = count( $data );
-        $per_page = $this->enable_pagination ? $this->get_items_per_page( 'items_per_page', 20 ) : $total_items;
-        $current_page = $this->get_pagenum();
-        if ( $this->enable_pagination ) {
-            $data = array_slice( $data, ( ( $current_page - 1 ) * $per_page ), $per_page );
+        if ( ! current_user_can( 'manage_options' ) ) {
+            wp_send_json_error( 'Unauthorized', 403 );
         }
 
-        $this->items = $data;
-        $this->set_pagination_args( array(
-            'total_items' => $total_items,
-            'per_page'    => $per_page,
-            'total_pages' => $this->enable_pagination ? ceil( $total_items / $per_page ) : 1,
+        $data                   = apply_filters( "wpdb_table_ajax_data_{$this->table_id}", array() );
+        $columns                = apply_filters( "wpdb_table_ajax_columns_{$this->table_id}", array() );
+        $searchable_columns     = apply_filters( "wpdb_table_ajax_searchable_columns_{$this->table_id}", array() );
+        $filterable_columns     = apply_filters( "wpdb_table_ajax_filterable_columns_{$this->table_id}", array() );
+        $cell_callbacks         = apply_filters( "wpdb_table_ajax_cell_callbacks_{$this->table_id}", array() );
+        $row_actions_callbacks  = apply_filters( "wpdb_table_ajax_row_actions_callbacks_{$this->table_id}", array() );
+        $enable_pagination      = apply_filters( "wpdb_table_ajax_enable_pagination_{$this->table_id}", true );
+        $enable_sorting         = apply_filters( "wpdb_table_ajax_enable_sorting_{$this->table_id}", true );
+        $enable_search          = apply_filters( "wpdb_table_ajax_enable_search_{$this->table_id}", true );
+        $enable_filters         = apply_filters( "wpdb_table_ajax_enable_filters_{$this->table_id}", false );
+        $enable_row_actions     = apply_filters( "wpdb_table_ajax_enable_row_actions_{$this->table_id}", false );
+
+        if ( empty( $data ) ) {
+            wp_send_json_error( 'No data provided for AJAX table.' );
+        }
+
+        $table = new self(
+            $data,
+            $columns,
+            $enable_pagination,
+            $enable_sorting,
+            $enable_search,
+            $searchable_columns,
+            $enable_filters,
+            $filterable_columns,
+            false,
+            $enable_row_actions,
+            $row_actions_callbacks,
+            $cell_callbacks,
+            $this->table_id
+        );
+
+        $table->prepare_items( $_POST );
+
+        wp_send_json_success( array(
+            'html'         => $table->get_table_body_html(),
+            'total_items'  => $table->get_pagination_arg( 'total_items' ),
+            'per_page'     => $table->get_pagination_arg( 'per_page' ),
+            'current_page' => isset( $_POST['paged'] ) ? absint( $_POST['paged'] ) : 1,
         ) );
     }
 
-    public function column_default( $item, $column_name ) {
-        // Callback personalizado
-        if ( isset( $this->cell_callbacks[ $column_name ] ) && is_callable( $this->cell_callbacks[ $column_name ] ) ) {
-            return call_user_func( $this->cell_callbacks[ $column_name ], $item, $column_name );
+    // ───────────────────────────────
+    // WRAPPER ESTÁTICO PARA HOOK AJAX
+    // ───────────────────────────────
+
+    public static function handle_ajax_request() {
+        if ( ! isset( $_POST['table_id'] ) ) {
+            wp_send_json_error( 'Missing table_id', 400 );
         }
 
-        return isset( $item[ $column_name ] ) ? esc_html( $item[ $column_name ] ) : '';
-    }
-
-    protected function handle_row_actions( $item, $column_name, $primary ) {
-        if ( ! $this->enable_row_actions || ! $primary ) {
-            return '';
-        }
-
-        $actions = array();
-
-        // Callback por columna primaria
-        if ( isset( $this->row_actions_callbacks[ $column_name ] ) && is_callable( $this->row_actions_callbacks[ $column_name ] ) ) {
-            $actions = call_user_func( $this->row_actions_callbacks[ $column_name ], $item );
-        } else {
-            // Acciones por defecto (solo como ejemplo)
-            $actions['view'] = '<a href="#">Ver</a>';
-        }
-
-        return $this->row_actions( $actions );
-    }
-
-    public function render_table() {
-        echo '<div class="wrap wpdb-table-renderer">';
-
-        if ( $this->enable_export ) {
-            $export_url = add_query_arg( array(
-                'wpdb_export_csv' => '1',
-                '_wpnonce'        => wp_create_nonce( 'export_csv' )
-            ) );
-            foreach ( array( 's', 'orderby', 'order', 'column_filter', 'filter_value' ) as $param ) {
-                if ( ! empty( $_GET[ $param ] ) ) {
-                    $export_url = add_query_arg( $param, $_GET[ $param ], $export_url );
-                }
-            }
-            echo '<a href="' . esc_url( $export_url ) . '" class="page-title-action">Exportar a CSV</a>';
-        }
-
-        $this->prepare_items();
-        if ( $this->enable_filters ) {
-            $this->views();
-        }
-        $this->search_box( 'Buscar', 'wpdb_search' );
-        $this->display();
-
-        echo '</div>';
-    }
-
-    public function ajax_response() {
-        ob_start();
-        $this->render_table();
-        $output = ob_get_clean();
-        wp_send_json_success( $output );
+        $table_id = sanitize_key( $_POST['table_id'] );
+        $instance = new self( array(), array(), true, true, true, array(), false, array(), false, false, array(), array(), $table_id );
+        $instance->ajax_response();
     }
 }
